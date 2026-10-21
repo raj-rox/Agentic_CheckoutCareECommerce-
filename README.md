@@ -129,8 +129,8 @@ Each stage is a working system. Each one adds a single control.
 ### Stage 2: Trust gateway ⭐
 
 > [!NOTE]
-> **"The user allowed it. Did this agent have the right to ask?"**
-> **Goal:** one deterministic checkpoint for every action that moves money.
+> **The user allowed it. Did this agent have the right to ask?**
+> - **Goal:** one deterministic checkpoint for every action that moves money.
 > - Each agent has its own key and `allowed_actions` in `agents.json`
 > - Gateway checks: user token, agent signature, mandate, rules
 > - Every decision written to the audit log
@@ -238,7 +238,7 @@ results = collection.query(query_texts=[query], where=where, n_results=4)
 
 > [!NOTE]
 > **"Agents hand off through the system of record, not through memory."**
-> **Goal:** Only 1 flow for the user, two agents underneath.
+> - **Goal:** Only 1 flow for the user, two agents underneath.
 > - Sidebar: Shop, Orders and help
 > - Order card has a Get help button that opens the care agent with `order_id`
 > - Agents share the store, not chat history
