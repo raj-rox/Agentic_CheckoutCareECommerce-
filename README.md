@@ -54,20 +54,31 @@ Each stage is a working system. Each one adds a single control.
 
 ### Stage 0: Baseline (no trust)
 
-**Goal:** the "before" picture.
+**Goal:** the "before" barebones MVP.
+
+**Gap:** Right now the model alone decides what gets bought or refunded. That’s the problem.
+
+1) Customer chats with one agent
+2) Agent’s tools call the store directly
+3) No identity, no limits, no record of anything
 
 - `store_api/` FastAPI app with in-memory seed data
   - `GET /catalog`, `GET /orders/{id}`, `POST /checkout`, `POST /refund`
 - `mcp_server/` FastMCP server with 4 tools that call the store API directly
 - `agent/` Claude client wired to the MCP server
 
-**Gap:** anyone can buy or refund anything. Nothing is logged.
+
 
 ---
 
 ### Stage 1: Authenticated MCP
 
 **Goal:** identity and scopes on every tool call.
+
+**Improvement:** "Role and scopes live on the token. The prompt can't change them."
+IdP issues JWTs with a role claim and scopes
+Tools: search_catalog, checkout, get_order, refund
+get_order only returns the caller’s own orders, decided in code
 
 **New**
 - `idp/issue_token.py`: generates an RS256 keypair, publishes `jwks.json`, issues JWTs with:
@@ -85,8 +96,6 @@ Each stage is a working system. Each one adds a single control.
 | `refund` | `refund:request` |
 
 - `get_order` filters by `sub` in code. Customers only see their own orders.
-
-**Say:** "Role and scopes live on the token. The prompt can't change them."
 
 ---
 
