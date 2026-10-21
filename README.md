@@ -6,8 +6,6 @@ A prototype of **one AI agent that shops and handles customer support**, with a 
 - **RAG** gives the agent knowledge: return, shipping, and warranty policies.
 - **A trust gateway** decides whether any action that moves money is allowed. The model never makes that call.
 
-> Core idea: assume the model will get tricked. Every control sits outside it.
-
 ---
 
 ## Why this exists
