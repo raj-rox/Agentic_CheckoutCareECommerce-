@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+fastmcp
+anthropic
+pyjwt[crypto]
+cryptography
+chromadb
+python-dotenv
+httpx
+pydantic
+pytest

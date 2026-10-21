@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+*.egg-info/
+.pytest_cache/
+
+# Secrets / generated keys
+idp/keys/
+idp/jwks.json
+gateway/registry/*.pem
+
+# Local data
+*.jsonl
+chroma_data/
+.DS_Store
