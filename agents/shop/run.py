@@ -26,7 +26,7 @@ MCP_URL = os.getenv("MCP_URL", "http://localhost:8000/mcp")
 
 async def load_tools(mcp: Client) -> list[dict]:
     tools = await mcp.list_tools()
-    return [{"name": t.name, "description": t.description or "", "input_schema": t.inputSchema} for t in tools]
+    return [{"name": t.name, "description": t.description or "", "input_schema": t.input_schema} for t in tools]
 
 
 async def run_tool(mcp: Client, block) -> dict:
