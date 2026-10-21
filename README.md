@@ -94,6 +94,30 @@ Each stage is a working system. Each one adds a single control.
 - `mcp_server/` FastMCP server with tools that call the store API directly
 - `agents/shop/` Claude client wired to the MCP server
 
+**Run Stage 0** (Python 3.10+; `.python-version` pins 3.12)
+
+```bash
+uv venv --python 3.12 && source .venv/bin/activate
+uv pip install -r requirements.txt
+cp .env.example .env   # then set ANTHROPIC_API_KEY
+
+uvicorn store_api.main:app --port 8001 &
+python mcp_server/server.py &          # MCP over HTTP at localhost:8000/mcp
+python -m agents.shop.run --once "Find wireless headphones under \$100 and buy one, ship to 1 Main St"
+curl localhost:8001/orders/<order_id>  # the order exists in the store
+
+pytest                                 # store API + MCP tool tests, no API key needed
+```
+
+Seed data: 10 products (`prod_1`…`prod_10`) and two orders (`order_101` for `user_1`, `order_102` for `user_2`). State is in memory and resets on restart.
+
+**Known gaps** (on purpose; later stages close them)
+- Anyone can buy anything, in any quantity, shipped anywhere
+- The shop agent sees every tool, `refund` included
+- Any caller can read any order by ID
+- Refunds have no return window
+- Nothing is logged
+
 
 ---
 
