@@ -1,4 +1,4 @@
-# Agent Checkout + Care
+# Agentic Checkout & Customer Care
 
 Two AI agents, one for **shopping** and one for **customer care**, sharing a **deterministic trust layer** underneath them.
 
