@@ -1,4 +1,4 @@
-# Agent Checkout + Care
+# Agentic Checkout & Customer Care
 
 A prototype of **one AI agent that shops and handles customer support**, with a **deterministic trust layer** underneath it.
 
