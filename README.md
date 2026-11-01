@@ -131,22 +131,50 @@ Seed data: 10 products (`prod_1`…`prod_10`) and two orders (`order_101` for `u
 
 
 **New**
-- `idp/issue_token.py`: generates an RS256 keypair, publishes `jwks.json`, issues user JWTs with:
-  - `sub`, `role` (`customer` or `staff`), `scopes`, `aud`, `iss`, `exp`
-- `mcp_server/auth.py`: `verify_token()` checks signature, `exp`, `aud`, `iss`
-- `mcp_server/allowlist.py`: maps each agent to the tools it may see
+- `idp/issue_token.py`: generates an RS256 keypair, publishes `idp/jwks.json`, issues user JWTs with:
+  - `sub`, `role` (`customer` or `staff`), `scopes`, `client_id`, `aud`, `iss`, `exp`
+  - `client_id` is the agent the token was issued to (`shop-agent`, `care-agent`). It's signed, so an agent can't pass itself off as another.
+- `mcp_server/auth.py`: `verify_token()` checks the signature (RS256 only), `exp`, `aud`, `iss`, and that `role`, `client_id` and `scopes` are well formed. A bad or missing token gets a `401` before any tool runs.
+- `mcp_server/allowlist.py`: maps each agent (`client_id`) to the tools it may see. Other tools are hidden from `list_tools` and refused on call.
+
+| Agent | Tools |
+|---|---|
+| `shop-agent` | `search_catalog`, `checkout` |
+| `care-agent` | `get_order`, `refund` (the agent itself arrives in Stage 3) |
 
 **Changed**
 - Each tool declares the user scope it needs:
 
 | Tool | Scope |
 |---|---|
-| `search_catalog` | none |
+| `search_catalog` | none (valid token still required) |
 | `get_order` | `orders:read` |
 | `checkout` | `payment:execute` |
 | `refund` | `refund:request` |
 
-- `get_order` filters by `sub` in code. Customers only see their own orders.
+- Role default scopes: `customer` gets all three; `staff` gets `orders:read` and `refund:request`.
+- `get_order` and `refund` filter by `sub` in code. Customers only reach their own orders; someone else's order looks the same as one that doesn't exist. Staff reach any order.
+- `checkout` places the order in the token's `sub`.
+- The shop agent sends `USER_TOKEN` as a bearer token.
+
+**Run Stage 1**
+
+```bash
+uvicorn store_api.main:app --port 8001 &
+python -m mcp_server.server &          # now run as a module
+export USER_TOKEN=$(python -m idp.issue_token --sub user_1 --role customer --client shop-agent)
+python -m agents.shop.run --once "Find wireless headphones under \$100 and buy one, ship to 1 Main St"
+
+pytest                                 # adds token checks and per-agent / per-user access tests
+```
+
+The first `issue_token` run creates the keypair (`idp/keys/`, `idp/jwks.json`, both gitignored); the MCP server reads `jwks.json` on each request. `--scopes "orders:read"` issues a narrower token; `--ttl` sets its lifetime.
+
+**Known gaps** (closed in Stage 2)
+- The store API is still open: anyone who can reach it directly skips every check
+- A valid token can still buy anything, in any quantity, shipped anywhere
+- Refunds have no return window or amount limit
+- Nothing is logged
 
 ---
 

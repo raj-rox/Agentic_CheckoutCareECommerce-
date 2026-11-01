@@ -1,8 +1,10 @@
 """Shop agent: Claude chat loop wired to the store MCP server.
 
-Stage 0: the agent sees every tool the MCP server exposes and nothing checks
-what it buys.
+Stage 1: the agent acts for one user, with a token the IdP issued to
+shop-agent. The MCP server only shows it search_catalog and checkout, and
+orders are placed in that user's name. Nothing yet limits what it buys.
 
+    export USER_TOKEN=$(python -m idp.issue_token --sub user_1 --role customer --client shop-agent)
     python -m agents.shop.run                       # interactive
     python -m agents.shop.run --once "buy a mouse"  # single request
 """
@@ -15,6 +17,7 @@ import os
 import anthropic
 from dotenv import load_dotenv
 from fastmcp import Client
+from mcp.shared.exceptions import MCPError
 
 from agents.shop.prompt import SYSTEM_PROMPT
 
@@ -22,6 +25,7 @@ load_dotenv()
 
 MODEL = "claude-opus-5-5"
 MCP_URL = os.getenv("MCP_URL", "http://localhost:8000/mcp")
+TOKEN_HINT = "python -m idp.issue_token --sub user_1 --role customer --client shop-agent"
 
 
 async def load_tools(mcp: Client) -> list[dict]:
@@ -74,12 +78,15 @@ async def turn(claude: anthropic.AsyncAnthropic, mcp: Client, tools: list[dict],
 
 
 async def main() -> None:
-    parser = argparse.ArgumentParser(description="Stage 0 shop agent")
+    parser = argparse.ArgumentParser(description="Stage 1 shop agent")
     parser.add_argument("--once", metavar="REQUEST", help="run a single request and exit")
+    parser.add_argument("--token", default=os.getenv("USER_TOKEN"), help="user token (default: $USER_TOKEN)")
     args = parser.parse_args()
+    if not args.token:
+        raise SystemExit(f"No user token. Set USER_TOKEN or pass --token. Issue one with:\n  {TOKEN_HINT}")
 
     claude = anthropic.AsyncAnthropic()
-    async with Client(MCP_URL) as mcp:
+    async with Client(MCP_URL, auth=args.token) as mcp:
         tools = await load_tools(mcp)
         print(f"Connected to {MCP_URL}. Tools: {', '.join(t['name'] for t in tools)}")
         messages: list = []
@@ -110,3 +117,5 @@ if __name__ == "__main__":
         raise SystemExit("Claude API authentication failed. Set ANTHROPIC_API_KEY in .env.")
     except anthropic.APIError as e:
         raise SystemExit(f"Claude API error: {e}")
+    except MCPError as e:  # most often a 401: the token is missing, expired or for the wrong audience
+        raise SystemExit(f"MCP server refused the session ({e}). Check USER_TOKEN, or issue a new one with:\n  {TOKEN_HINT}")
