@@ -5,6 +5,8 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from idp import issue_token as idp
+from idp.issue_mandate import issue_mandate
+from idp.verify import verify_mandate
 from mcp_server.auth import InvalidToken, StoreTokenVerifier, verify_token
 
 pytestmark = pytest.mark.anyio
@@ -73,3 +75,34 @@ async def test_verifier_maps_claims():
 
 async def test_verifier_returns_none_for_bad_token():
     assert await StoreTokenVerifier().verify_token("not-a-jwt") is None
+
+
+def test_valid_mandate():
+    got = verify_mandate(issue_mandate("user_1", "shop-agent", 300, "1 Main St"))
+    assert (got["sub"], got["agent"], got["max_amount"], got["ship_to"]) == ("user_1", "shop-agent", 300, "1 Main St")
+
+
+def test_tokens_and_mandates_are_not_interchangeable():
+    with pytest.raises(InvalidToken):
+        verify_mandate(idp.issue_token("user_1", "customer", "shop-agent"))
+    with pytest.raises(InvalidToken):
+        verify_token(issue_mandate("user_1", "shop-agent", 300, "1 Main St"))
+
+
+@pytest.mark.parametrize("overrides", [
+    pytest.param({"typ": None}, id="no-typ"),
+    pytest.param({"max_amount": -5}, id="negative-cap"),
+    pytest.param({"max_amount": "300"}, id="cap-not-number"),
+    pytest.param({"ship_to": None}, id="no-ship-to"),
+    pytest.param({"jti": None}, id="no-jti"),
+])
+def test_rejected_mandate(overrides):
+    now = int(time.time())
+    base = {
+        "iss": idp.IDP_ISS, "aud": idp.IDP_AUD, "typ": "mandate", "jti": "mnd_1", "sub": "user_1",
+        "agent": "shop-agent", "max_amount": 300, "merchant_id": "merchant_1", "ship_to": "1 Main St",
+        "iat": now, "exp": now + 60,
+    }
+    base.update(overrides)
+    with pytest.raises(InvalidToken):
+        verify_mandate(sign({k: v for k, v in base.items() if v is not None}))

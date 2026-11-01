@@ -3,12 +3,36 @@ from fastapi.testclient import TestClient
 
 from store_api import seed
 from store_api.main import app
+from tests.conftest import SERVICE_KEY
 
 
 @pytest.fixture
 def client():
     seed.reset()
-    return TestClient(app)
+    return TestClient(app, headers={"X-Service-Key": SERVICE_KEY})
+
+
+@pytest.mark.parametrize("method, path, body", [
+    ("GET", "/orders/order_101", None),
+    ("POST", "/checkout", {"items": [{"product_id": "prod_1"}]}),
+    ("POST", "/refund", {"order_id": "order_101"}),
+])
+@pytest.mark.parametrize("headers", [{}, {"X-Service-Key": "wrong"}], ids=["no-key", "wrong-key"])
+def test_order_endpoints_only_answer_the_gateway(method, path, body, headers):
+    seed.reset()
+    resp = TestClient(app).request(method, path, json=body, headers=headers)
+    assert resp.status_code == 401
+    assert seed.ORDERS["order_101"].status == "placed" and len(seed.ORDERS) == 2
+
+
+def test_store_fails_closed_without_a_service_key(monkeypatch):
+    monkeypatch.delenv("STORE_SERVICE_KEY")
+    resp = TestClient(app).get("/orders/order_101", headers={"X-Service-Key": ""})
+    assert resp.status_code == 503
+
+
+def test_catalog_is_public():
+    assert TestClient(app).get("/catalog").status_code == 200
 
 
 def test_search_by_keyword(client):

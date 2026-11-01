@@ -1,14 +1,32 @@
-"""Mock merchant API. Stage 0: no identity, no limits, no log."""
+"""Mock merchant API.
 
+Stage 2: orders, checkout and refunds only answer the trust gateway, which
+proves itself with the shared X-Service-Key header. The catalog stays public.
+The checks themselves live in the gateway; the store just keeps the records.
+"""
+
+import hmac
+import os
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from dotenv import load_dotenv
+from fastapi import Depends, FastAPI, Header, HTTPException
 
 from store_api import seed
 from store_api.models import CheckoutRequest, Order, OrderItem, Product, RefundRequest
 
+load_dotenv()
+
 app = FastAPI(title="Store API")
+
+
+def gateway_only(x_service_key: Optional[str] = Header(None)) -> None:
+    expected = os.getenv("STORE_SERVICE_KEY")
+    if not expected:
+        raise HTTPException(503, "STORE_SERVICE_KEY is not set; the store refuses order calls without it")
+    if x_service_key is None or not hmac.compare_digest(x_service_key, expected):
+        raise HTTPException(401, "Only the trust gateway may call this endpoint")
 
 
 @app.get("/health")
@@ -40,8 +58,7 @@ def get_product(product_id: str):
     return product
 
 
-# Gap: any caller can read any order. Stage 1 filters by user.
-@app.get("/orders/{order_id}", response_model=Order)
+@app.get("/orders/{order_id}", response_model=Order, dependencies=[Depends(gateway_only)])
 def get_order(order_id: str):
     order = seed.ORDERS.get(order_id)
     if order is None:
@@ -49,8 +66,7 @@ def get_order(order_id: str):
     return order
 
 
-# Gap: no amount, quantity or address limits. Stage 2 adds the gateway.
-@app.post("/checkout", response_model=Order)
+@app.post("/checkout", response_model=Order, dependencies=[Depends(gateway_only)])
 def checkout(req: CheckoutRequest):
     items = []
     for line in req.items:
@@ -76,8 +92,7 @@ def checkout(req: CheckoutRequest):
     return order
 
 
-# Gap: no return window and no limit on who can refund.
-@app.post("/refund", response_model=Order)
+@app.post("/refund", response_model=Order, dependencies=[Depends(gateway_only)])
 def refund(req: RefundRequest):
     order = seed.ORDERS.get(req.order_id)
     if order is None:
