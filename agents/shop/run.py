@@ -1,10 +1,14 @@
 """Shop agent: Claude chat loop wired to the store MCP server.
 
-Stage 1: the agent acts for one user, with a token the IdP issued to
-shop-agent. The MCP server only shows it search_catalog and checkout, and
-orders are placed in that user's name. Nothing yet limits what it buys.
+Stage 2: the agent acts for one user, with a token the IdP issued to
+shop-agent and a mandate capping what it may spend. This runtime holds the
+agent's Ed25519 key and signs every tool call that moves money; the model
+never sees the key or the signature. The trust gateway approves, denies or
+asks the user to approve each purchase.
 
+    python -m gateway.register_agents   # once: creates agents/keys/shop-agent.pem
     export USER_TOKEN=$(python -m idp.issue_token --sub user_1 --role customer --client shop-agent)
+    export MANDATE_TOKEN=$(python -m idp.issue_mandate --sub user_1 --agent shop-agent --max 300 --ship-to "1 Main St")
     python -m agents.shop.run                       # interactive
     python -m agents.shop.run --once "buy a mouse"  # single request
 """
@@ -20,23 +24,45 @@ from fastmcp import Client
 from mcp.shared.exceptions import MCPError
 
 from agents.shop.prompt import SYSTEM_PROMPT
+from gateway import signatures
+from gateway.register_agents import load_key
 
 load_dotenv()
 
 MODEL = "claude-opus-5-5"
+AGENT_ID = "shop-agent"
 MCP_URL = os.getenv("MCP_URL", "http://localhost:8000/mcp")
 TOKEN_HINT = "python -m idp.issue_token --sub user_1 --role customer --client shop-agent"
+MANDATE_HINT = 'python -m idp.issue_mandate --sub user_1 --agent shop-agent --max 300 --ship-to "1 Main St"'
 
 
-async def load_tools(mcp: Client) -> list[dict]:
+class Signer:
+    """Signs the calls the MCP server marks as gateway actions, and adds the mandate to purchases."""
+
+    def __init__(self, key, mandate: str | None):
+        self.key, self.mandate, self.actions = key, mandate, {}
+
+    def meta(self, tool: str, args: dict) -> dict | None:
+        action = self.actions.get(tool)
+        if action is None:
+            return None
+        meta = signatures.sign(self.key, AGENT_ID, action, args)
+        if action == "purchase":
+            meta["mandate"] = self.mandate
+        return meta
+
+
+async def load_tools(mcp: Client, signer: Signer) -> list[dict]:
     tools = await mcp.list_tools()
+    signer.actions = {t.name: t.meta["action"] for t in tools if t.meta and "action" in t.meta}
     return [{"name": t.name, "description": t.description or "", "input_schema": t.input_schema} for t in tools]
 
 
-async def run_tool(mcp: Client, block) -> dict:
+async def run_tool(mcp: Client, signer: Signer, block) -> dict:
     print(f"  → {block.name} {json.dumps(block.input)}")
     try:
-        result = await mcp.call_tool(block.name, block.input, raise_on_error=False)
+        meta = signer.meta(block.name, block.input)
+        result = await mcp.call_tool(block.name, block.input, raise_on_error=False, meta=meta)
         text = "\n".join(c.text for c in result.content if c.type == "text")
         is_error = result.is_error
     except Exception as e:  # transport failure: report it to the model rather than crash
@@ -46,7 +72,7 @@ async def run_tool(mcp: Client, block) -> dict:
     return {"type": "tool_result", "tool_use_id": block.id, "content": text, "is_error": is_error}
 
 
-async def turn(claude: anthropic.AsyncAnthropic, mcp: Client, tools: list[dict], messages: list) -> None:
+async def turn(claude: anthropic.AsyncAnthropic, mcp: Client, signer: Signer, tools: list[dict], messages: list) -> None:
     """Run one user turn to completion, appending everything to messages."""
     while True:
         response = await claude.beta.messages.create(
@@ -67,7 +93,7 @@ async def turn(claude: anthropic.AsyncAnthropic, mcp: Client, tools: list[dict],
 
         if response.stop_reason == "tool_use":
             tool_uses = [b for b in response.content if b.type == "tool_use"]
-            results = await asyncio.gather(*(run_tool(mcp, b) for b in tool_uses))
+            results = await asyncio.gather(*(run_tool(mcp, signer, b) for b in tool_uses))
             messages.append({"role": "user", "content": list(results)})
             continue
         if response.stop_reason == "refusal":
@@ -78,22 +104,29 @@ async def turn(claude: anthropic.AsyncAnthropic, mcp: Client, tools: list[dict],
 
 
 async def main() -> None:
-    parser = argparse.ArgumentParser(description="Stage 1 shop agent")
+    parser = argparse.ArgumentParser(description="Stage 2 shop agent")
     parser.add_argument("--once", metavar="REQUEST", help="run a single request and exit")
     parser.add_argument("--token", default=os.getenv("USER_TOKEN"), help="user token (default: $USER_TOKEN)")
+    parser.add_argument("--mandate", default=os.getenv("MANDATE_TOKEN"), help="spending mandate (default: $MANDATE_TOKEN)")
     args = parser.parse_args()
     if not args.token:
         raise SystemExit(f"No user token. Set USER_TOKEN or pass --token. Issue one with:\n  {TOKEN_HINT}")
+    if not args.mandate:
+        print(f"No mandate: the gateway will deny every purchase. Issue one with:\n  {MANDATE_HINT}")
+    try:
+        signer = Signer(load_key(AGENT_ID), args.mandate)
+    except FileNotFoundError:
+        raise SystemExit(f"No key for {AGENT_ID}. Create one with:\n  python -m gateway.register_agents")
 
     claude = anthropic.AsyncAnthropic()
     async with Client(MCP_URL, auth=args.token) as mcp:
-        tools = await load_tools(mcp)
+        tools = await load_tools(mcp, signer)
         print(f"Connected to {MCP_URL}. Tools: {', '.join(t['name'] for t in tools)}")
         messages: list = []
 
         if args.once:
             messages.append({"role": "user", "content": args.once})
-            await turn(claude, mcp, tools, messages)
+            await turn(claude, mcp, signer, tools, messages)
             return
 
         while True:
@@ -107,7 +140,7 @@ async def main() -> None:
             if user in {"exit", "quit"}:
                 return
             messages.append({"role": "user", "content": user})
-            await turn(claude, mcp, tools, messages)
+            await turn(claude, mcp, signer, tools, messages)
 
 
 if __name__ == "__main__":

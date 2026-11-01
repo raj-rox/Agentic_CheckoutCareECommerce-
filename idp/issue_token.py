@@ -5,6 +5,7 @@ public key is published as idp/jwks.json for the MCP server to verify against.
 
     python -m idp.issue_token --sub user_1 --role customer --client shop-agent
     python -m idp.issue_token --sub staff_1 --role staff --client care-agent --ttl 600
+    python -m idp.issue_token --sub user_1 --role customer --client customer-app  # approves step-ups
 """
 
 import argparse
@@ -66,6 +67,7 @@ def issue_token(sub: str, role: str, client_id: str, scopes: Optional[list[str]]
     claims = {
         "iss": IDP_ISS,
         "aud": IDP_AUD,
+        "typ": "user",
         "sub": sub,
         "role": role,
         "scopes": ROLE_SCOPES[role] if scopes is None else scopes,

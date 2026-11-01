@@ -9,7 +9,8 @@ venv/
 # Secrets / generated keys
 idp/keys/
 idp/jwks.json
-gateway/registry/*.pem
+agents/keys/
+gateway/registry/
 
 # Local data
 *.jsonl

@@ -187,38 +187,75 @@ The first `issue_token` run creates the keypair (`idp/keys/`, `idp/jwks.json`, b
 > - Gateway checks: user token, agent signature, mandate, rules
 > - Every decision written to the audit log
 
+**Who signs**
 
-**New**
-- `gateway/` FastAPI proxy in front of the store API
-- `gateway/signatures.py`: verifies an Ed25519 signature over `method + path + body + timestamp`
-- `gateway/registry/agents.json`: each agent's public key and `allowed_actions`
+The agent *runtime* (`agents/shop/run.py`) holds the agent's Ed25519 key, not the model and not the MCP server. For every tool the MCP server marks as an action (`meta={"action": "purchase"}`), the runtime signs an envelope and sends it in the call's `_meta`:
 
 ```json
-{
-  "shop-agent": { "public_key": "...", "allowed_actions": ["purchase"] },
-  "care-agent": { "public_key": "...", "allowed_actions": ["refund"] }
-}
+{"agent": "shop-agent", "action": "purchase", "args": {...}, "ts": 1730000000, "nonce": "..."}
 ```
 
-- `gateway/mandate.py`: verifies the user's signed mandate JWT
-  - `max_amount`, `merchant_id`, `ship_to`, `exp`
-- `gateway/rules.py`: `decide(request) -> approve | step_up | deny`, always with a reason
-- `gateway/audit.jsonl`: one line per decision
-- Step-up flow: gateway returns `202` with an `approval_id`; user approves via `POST /approve/{id}`
+The MCP server forwards it untouched and holds no agent keys. The gateway verifies it and acts **only on the signed args**, so nothing between the agent and the gateway can change what was asked.
 
-**Check order**
-1. User token valid?
-2. Agent signature matches a registered key?
+**New**
+- `gateway/main.py`: FastAPI service in front of the store API: `POST /purchase`, `POST /refund`, `GET /orders/{id}`, `GET /approvals/{id}`, `POST /approve/{id}`
+- `gateway/signatures.py`: `sign()` for agent runtimes, `verify()` for the gateway. Ed25519 over canonical JSON; rejects unknown agents, timestamps more than 60s off, and reused nonces
+- `gateway/register_agents.py`: generates each agent's key (`agents/keys/`) and `gateway/registry/agents.json` (public key + `allowed_actions`). Both are gitignored
+- `idp/issue_mandate.py`: the user's signed mandate: `max_amount` (total across every order under it), `merchant_id`, `ship_to`, `exp`, `jti`. `typ=mandate`, so it can't stand in for a user token or the other way round
+- `gateway/mandate.py`: verifies the mandate and binds it to the same user and agent as the request
+- `gateway/rules.py`: `decide_purchase()` / `decide_refund()`: pure functions, always with a reason
+- `gateway/audit.py`: one JSON line per decision, hash-chained; `python -m gateway.audit` checks the chain. No tokens or signatures are logged
+- `gateway/approve.py`: the user's side of a step-up: shows what's pending, then approves it
+
+**Check order** (the first failure decides, and every outcome is logged)
+1. User token valid, with the scope for this action?
+2. Agent signature matches a registered key, and the token was issued to **that same agent**?
 3. Action in this agent's `allowed_actions`?
-4. Inside the user's mandate?
+4. Inside the user's mandate? (purchases)
 5. Risk rules → approve, step-up, or deny
 
 **Rules**
 
 | Action | Approve | Step-up | Deny |
 |---|---|---|---|
-| Purchase | Under $100, inside mandate | $100 to mandate cap | Outside mandate |
-| Refund | Under $50, inside return window | $50 and above | Outside return window |
+| Purchase | Under $100, inside mandate | $100 to mandate cap | Outside mandate: over the remaining cap, wrong address or merchant |
+| Refund | Under $50, inside 30-day window | $50 and above | Outside window, already refunded, over the order total |
+
+- The gateway prices orders itself from the catalog; it never trusts an amount from the agent.
+- **Step-up:** the gateway holds the action and returns `202` with an `approval_id`. Only the user's own app (`client_id=customer-app`) can approve it, so an agent holding the user's token can't approve its own request. Approvals are single use, expire after 10 minutes, and the rules are rerun at approval (e.g. the mandate may have been spent in the meantime).
+
+**Changed**
+- `store_api/`: `/orders`, `/checkout` and `/refund` require `X-Service-Key`, which only the gateway has. Without `STORE_SERVICE_KEY` set, the store refuses them. `/catalog` stays public.
+- `mcp_server/server.py`: `get_order`, `checkout` and `refund` go through the gateway. A step-up comes back to the agent as a normal result with an `approval_id`; a denial is a tool error carrying the reason and decision ID.
+- `idp/verify.py`: token verification moved here from `mcp_server/auth.py`, shared by the MCP server and the gateway.
+
+**Run Stage 2**
+
+```bash
+# once: set STORE_SERVICE_KEY in .env (python -c "import secrets; print(secrets.token_hex(32))")
+python -m gateway.register_agents
+
+uvicorn store_api.main:app --port 8001 &
+uvicorn gateway.main:app --port 8002 &
+python -m mcp_server.server &
+
+export USER_TOKEN=$(python -m idp.issue_token --sub user_1 --role customer --client shop-agent)
+export MANDATE_TOKEN=$(python -m idp.issue_mandate --sub user_1 --agent shop-agent --max 300 --ship-to "1 Main St")
+python -m agents.shop.run --once "Buy the wireless headphones, ship to 1 Main St"   # $79.99 → approved
+python -m agents.shop.run --once "Buy the smart watch, ship to 1 Main St"           # $199.99 → step-up
+
+export APPROVER_TOKEN=$(python -m idp.issue_token --sub user_1 --role customer --client customer-app)
+python -m gateway.approve <approval_id>
+cat gateway/audit.jsonl && python -m gateway.audit
+
+pytest   # adds rules, signature, mandate and gateway tests
+```
+
+**Known gaps** (on purpose)
+- Spend ledger, nonce cache and pending approvals live in gateway memory and reset on restart
+- The gateway handles one money action at a time (a single lock), which is fine for a demo but not for throughput
+- The customer approves their own refund step-ups; a real store would want staff to approve those
+- No quantity limit in the mandate; the total cap does the work for now
 
 ---
 
@@ -345,7 +382,7 @@ git clone <repo-url> && cd agent-checkout-care
 pip install -r requirements.txt
 
 python idp/issue_token.py --role customer --sub user_1   # prints a JWT
-python gateway/register_agents.py                        # creates agent keys
+python -m gateway.register_agents                        # creates agent keys
 python rag/ingest.py                                     # load policies
 
 uvicorn store_api.main:app --port 8001 &

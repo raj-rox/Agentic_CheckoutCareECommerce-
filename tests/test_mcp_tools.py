@@ -6,10 +6,13 @@ from fastapi.testclient import TestClient
 from fastmcp import Client
 from fastmcp.utilities.tests import run_server_async
 
+from gateway import audit
+from gateway import main as gateway
 from idp.issue_token import issue_token
 from mcp_server import server
 from store_api import seed
 from store_api.main import app
+from tests.helpers import mandate, signed
 
 pytestmark = pytest.mark.anyio
 
@@ -24,8 +27,10 @@ def anyio_backend():
 @pytest.fixture(autouse=True)
 def store(monkeypatch):
     seed.reset()
-    # Route the MCP tools' HTTP calls into the FastAPI app in-process.
+    # Route MCP -> gateway -> store in-process.
     monkeypatch.setattr(server, "store", TestClient(app))
+    monkeypatch.setattr(server, "gateway", TestClient(gateway.app))
+    monkeypatch.setattr(gateway, "store", TestClient(app))
 
 
 @pytest.fixture(scope="module")
@@ -85,10 +90,13 @@ async def test_checkout_needs_payment_scope(url):
 
 
 async def test_checkout_records_buyer_and_handoff(url):
+    args = {"items": [{"product_id": "prod_1", "qty": 1}], "ship_to": "1 Main St"}
     async with as_agent(url, "shop-agent", sub="user_1") as mcp:
         products = data(await mcp.call_tool("search_catalog", {"query": "headphones", "max_price": 100}))
         assert [p["id"] for p in products] == ["prod_1"]
-        order = data(await mcp.call_tool("checkout", {"items": [{"product_id": "prod_1", "qty": 1}], "ship_to": "1 Main St"}))
+        result = data(await mcp.call_tool("checkout", args, meta=signed("shop-agent", "purchase", args, mandate())))
+    order = result["order"]
+    assert result["decision"] == "approve"
     assert order["user_id"] == "user_1" and order["total"] == 79.99
 
     async with as_agent(url, "care-agent", sub="user_1") as mcp:
@@ -114,10 +122,45 @@ async def test_staff_can_see_any_order(url):
 
 async def test_customer_refunds_only_own_orders(url):
     async with as_agent(url, "care-agent", sub="user_1") as mcp:
-        other = await mcp.call_tool("refund", {"order_id": "order_102"}, raise_on_error=False)
-        own = data(await mcp.call_tool("refund", {"order_id": "order_101"}))
+        args = {"order_id": "order_102"}
+        other = await mcp.call_tool("refund", args, meta=signed("care-agent", "refund", args), raise_on_error=False)
+        args = {"order_id": "order_101"}
+        own = data(await mcp.call_tool("refund", args, meta=signed("care-agent", "refund", args)))
     assert other.is_error and seed.ORDERS["order_102"].status == "placed"
-    assert own["status"] == "refunded"
+    assert own["order"]["status"] == "refunded"
+
+
+async def test_tools_advertise_their_gateway_action(url):
+    async with as_agent(url, "shop-agent") as mcp:
+        actions = {t.name: (t.meta or {}).get("action") for t in await mcp.list_tools()}
+    assert actions == {"search_catalog": None, "checkout": "purchase"}
+
+
+async def test_unsigned_checkout_is_denied_and_logged(url):
+    async with as_agent(url, "shop-agent") as mcp:
+        result = await mcp.call_tool("checkout", {"items": [{"product_id": "prod_1"}]}, raise_on_error=False)
+    assert result.is_error and "Missing or malformed agent signature" in result.content[0].text
+    assert audit.entries()[-1]["rule"] == "signature"
+    assert seed.PRODUCTS["prod_1"].stock == 25
+
+
+async def test_step_up_comes_back_as_a_result(url):
+    args = {"items": [{"product_id": "prod_9"}], "ship_to": "1 Main St"}
+    async with as_agent(url, "shop-agent") as mcp:
+        result = await mcp.call_tool("checkout", args, meta=signed("shop-agent", "purchase", args, mandate()))
+    assert not result.is_error
+    assert data(result)["decision"] == "step_up" and data(result)["approval_id"].startswith("appr_")
+
+
+async def test_gateway_acts_on_the_signed_args_only(url):
+    # The tool args say prod_6 x 99; the agent signed prod_1 x 1. The gateway buys what was signed.
+    signed_args = {"items": [{"product_id": "prod_1", "qty": 1}], "ship_to": "1 Main St"}
+    async with as_agent(url, "shop-agent") as mcp:
+        result = data(await mcp.call_tool(
+            "checkout", {"items": [{"product_id": "prod_6", "qty": 99}], "ship_to": "1 Main St"},
+            meta=signed("shop-agent", "purchase", signed_args, mandate()),
+        ))
+    assert [(i["product_id"], i["qty"]) for i in result["order"]["items"]] == [("prod_1", 1)]
 
 
 async def test_store_error_becomes_tool_error(url):
